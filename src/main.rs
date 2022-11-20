@@ -18,7 +18,7 @@ use status::Status;
 use tracing::{info, trace};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::config::Config;
+use crate::config::{Config, ListenStack};
 
 mod config;
 mod status;
@@ -38,17 +38,13 @@ async fn main() {
         .init();
 
     let config = Config::init(config_file).await.unwrap();
+    info!("config: {:?}", config);
 
     let localhost_v4 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), config.listen_port);
     let incoming_v4 = AddrIncoming::bind(&localhost_v4).unwrap();
 
     let localhost_v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), config.listen_port);
     let incoming_v6 = AddrIncoming::bind(&localhost_v6).unwrap();
-
-    let combined = CombinedIncoming {
-        a: incoming_v4,
-        b: incoming_v6,
-    };
 
     // build our application with a route
     let services = config.services.clone();
@@ -60,12 +56,35 @@ async fn main() {
     let app = app.fallback(handler_404);
 
     // run it
-    info!("listening v4 on http://{}", &localhost_v4,);
-    info!("listening v6 on http://{}", &localhost_v6,);
-    axum::Server::builder(combined)
-        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .unwrap();
+    if let ListenStack::Both = config.listen_stack {
+        info!("listening v4 on http://{}", &localhost_v4);
+        info!("listening v6 on http://{}", &localhost_v6);
+        let combined = CombinedIncoming {
+            a: incoming_v4,
+            b: incoming_v6,
+        };
+        axum::Server::builder(combined)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .unwrap();
+    } else {
+        let incoming = match config.listen_stack {
+            config::ListenStack::V4 => {
+                info!("listening v4 on http://{}", &localhost_v4);
+                incoming_v4
+            }
+            config::ListenStack::V6 => {
+                info!("listening v6 on http://{}", &localhost_v6);
+                incoming_v6
+            }
+            _ => unreachable!(),
+        };
+
+        axum::Server::builder(incoming)
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .unwrap();
+    }
 }
 
 struct HtmlTemplate<T>(T);
