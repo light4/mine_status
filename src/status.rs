@@ -1,8 +1,6 @@
 use askama::Template;
 use tokio::process::Command;
 
-use crate::config::Config;
-
 #[derive(Debug, Default, Template)]
 #[template(path = "status.html")]
 pub struct Status {
@@ -13,7 +11,7 @@ pub struct Status {
 }
 
 impl Status {
-    pub async fn init(config: &Config) -> Self {
+    pub async fn init(service_names: Vec<String>) -> Self {
         let hostname = Command::new("hostname")
             .output()
             .await
@@ -34,7 +32,7 @@ impl Status {
             .unwrap_or_else(|_| "unknown".to_string());
 
         let mut services = vec![];
-        for s in &config.services {
+        for s in &service_names {
             services.push(get_service(s).await);
         }
 

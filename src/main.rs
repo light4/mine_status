@@ -1,11 +1,22 @@
+use std::{
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    pin::Pin,
+    task::{Context, Poll},
+};
+
 use askama::Template;
 use axum::{
-    http::StatusCode,
+    body::Body,
+    extract::ConnectInfo,
+    http::{Request, StatusCode},
     response::{Html, IntoResponse, Response},
     routing::get,
     Router,
 };
+use hyper::server::{accept::Accept, conn::AddrIncoming};
 use status::Status;
+use tracing::{info, trace};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::Config;
 
@@ -17,15 +28,42 @@ async fn main() {
     let config_file = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "config.kdl".to_string());
-    // build our application with a route
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::new(
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "mine_status=info,tower_http=error".into()),
+        ))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
     let config = Config::init(config_file).await.unwrap();
-    let config_clone = config.clone();
-    let app = Router::new().route("/", get(move || handler(config_clone)));
+
+    let localhost_v4 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), config.listen_port);
+    let incoming_v4 = AddrIncoming::bind(&localhost_v4).unwrap();
+
+    let localhost_v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), config.listen_port);
+    let incoming_v6 = AddrIncoming::bind(&localhost_v6).unwrap();
+
+    let combined = CombinedIncoming {
+        a: incoming_v4,
+        b: incoming_v6,
+    };
+
+    // build our application with a route
+    let services = config.services.clone();
+    let app = Router::new()
+        .route("/", get(move || get_status(services)))
+        .route("/ip", get(get_ip));
+
+    // add a fallback service for handling routes to unknown paths
+    let app = app.fallback(handler_404);
 
     // run it
-    println!("listening on {}", &config.bind_addr);
-    axum::Server::bind(&config.bind_addr)
-        .serve(app.into_make_service())
+    info!("listening v4 on http://{}", &localhost_v4,);
+    info!("listening v6 on http://{}", &localhost_v6,);
+    axum::Server::builder(combined)
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .unwrap();
 }
@@ -48,7 +86,51 @@ where
     }
 }
 
-async fn handler(config: Config) -> impl IntoResponse {
-    let status = Status::init(&config).await;
+async fn get_status(services: Vec<String>) -> impl IntoResponse {
+    let status = Status::init(services).await;
     HtmlTemplate(status)
+}
+
+async fn get_ip(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    req: Request<Body>,
+) -> impl IntoResponse {
+    trace!(?req);
+    trace!(?addr);
+    let req_ip_str = addr.ip().to_string();
+    let ip = req
+        .headers()
+        .get("X-Forwarded-For")
+        .map(|i| i.to_str().unwrap())
+        .unwrap_or(&req_ip_str);
+    ip.to_string()
+}
+
+async fn handler_404() -> impl IntoResponse {
+    (StatusCode::NOT_FOUND, "nothing to see here")
+}
+
+struct CombinedIncoming {
+    a: AddrIncoming,
+    b: AddrIncoming,
+}
+
+impl Accept for CombinedIncoming {
+    type Conn = <AddrIncoming as Accept>::Conn;
+    type Error = <AddrIncoming as Accept>::Error;
+
+    fn poll_accept(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Self::Conn, Self::Error>>> {
+        if let Poll::Ready(Some(value)) = Pin::new(&mut self.a).poll_accept(cx) {
+            return Poll::Ready(Some(value));
+        }
+
+        if let Poll::Ready(Some(value)) = Pin::new(&mut self.b).poll_accept(cx) {
+            return Poll::Ready(Some(value));
+        }
+
+        Poll::Pending
+    }
 }
