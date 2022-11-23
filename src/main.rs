@@ -69,11 +69,11 @@ async fn main() {
             .unwrap();
     } else {
         let incoming = match config.listen_stack {
-            config::ListenStack::V4 => {
+            ListenStack::V4 => {
                 info!("listening v4 on http://{}", &localhost_v4);
                 incoming_v4
             }
-            config::ListenStack::V6 => {
+            ListenStack::V6 => {
                 info!("listening v6 on http://{}", &localhost_v6);
                 incoming_v6
             }
